@@ -15,6 +15,7 @@ description = "Real-world support operations environment for OpenEnv"
 requires-python = ">=3.10"
 dependencies = [
     "openenv-core[core]>=0.2.2",
+    "openai>=2.0.0",
     "requests>=2.33.0",
 ]
 

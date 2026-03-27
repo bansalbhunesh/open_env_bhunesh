@@ -16,6 +16,7 @@ except Exception as e:  # pragma: no cover
 try:
     from ..models import SupportOpsAction, SupportOpsObservation
     from ..evaluation import grade_episode_export, run_in_process_baseline
+    from ..baseline_inference import run_baseline
     from ..models import (
         BaselineResponse,
         GraderRequest,
@@ -27,6 +28,7 @@ try:
 except ImportError:
     from models import SupportOpsAction, SupportOpsObservation
     from evaluation import grade_episode_export, run_in_process_baseline
+    from baseline_inference import run_baseline
     from models import (
         BaselineResponse,
         GraderRequest,
@@ -49,7 +51,15 @@ app = create_app(
 
 @app.get("/tasks", response_model=TaskCatalogResponse, tags=["Environment Info"])
 def list_tasks() -> TaskCatalogResponse:
-    return TaskCatalogResponse(tasks=list_task_descriptors())
+    schema = SupportOpsAction.model_json_schema()
+    properties = schema.get("properties", {})
+    required = schema.get("required", [])
+    return TaskCatalogResponse(
+        tasks=list_task_descriptors(),
+        action_schema=schema,
+        action_required_fields=required,
+        action_fields=properties,
+    )
 
 
 @app.post("/grader", response_model=GraderResponse, tags=["Environment Info"])
@@ -60,8 +70,16 @@ def grade_episode(request: GraderRequest) -> GraderResponse:
 
 @app.get("/baseline", response_model=BaselineResponse, tags=["Environment Info"])
 @app.post("/baseline", response_model=BaselineResponse, tags=["Environment Info"])
-def run_baseline() -> BaselineResponse:
-    return run_in_process_baseline(SupportOpsEnvironment)
+def run_baseline_endpoint(mode: str = "deterministic") -> BaselineResponse:
+    mode_normalized = mode.strip().lower()
+    if mode_normalized not in {"deterministic", "openai", "in_process"}:
+        mode_normalized = "deterministic"
+    payload = run_baseline(
+        base_url="http://127.0.0.1:8000",
+        mode=mode_normalized,
+        model_name="gpt-4o-mini",
+    )
+    return BaselineResponse.model_validate(payload)
 
 
 def serve(host: str = "0.0.0.0", port: int = 8000):

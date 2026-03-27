@@ -50,6 +50,8 @@ It also exposes the extra endpoints required by the submission validator:
 - `POST /grader`
 - `GET|POST /baseline`
 
+`/tasks` returns both the task list and the typed `SupportOpsAction` JSON schema.
+
 ## Action Space
 
 The typed action model is `SupportOpsAction`.
@@ -140,16 +142,29 @@ uvicorn server.app:app --host 0.0.0.0 --port 8000
 curl http://localhost:8000/tasks
 ```
 
-### 4. Run the baseline script
+### 4. Run the baseline script (OpenAI mode)
 
 ```bash
-python -m support_ops_env.baseline_inference --base-url http://localhost:8000
+set OPENAI_API_KEY=your_key_here
+python -m support_ops_env.baseline_inference --base-url http://localhost:8000 --mode openai --model gpt-4o-mini
+```
+
+Deterministic fallback mode (no model API calls):
+
+```bash
+python -m support_ops_env.baseline_inference --base-url http://localhost:8000 --mode deterministic
 ```
 
 ### 5. Run the built-in baseline endpoint
 
 ```bash
 curl http://localhost:8000/baseline
+```
+
+You can also request OpenAI baseline mode through the endpoint:
+
+```bash
+curl "http://localhost:8000/baseline?mode=openai"
 ```
 
 ## Example Client Usage
@@ -242,7 +257,7 @@ After deployment, the Space serves:
 Recommended local checks:
 
 ```bash
-python -m support_ops_env.baseline_inference --base-url http://localhost:8000
+python -m support_ops_env.baseline_inference --base-url http://localhost:8000 --mode deterministic
 openenv validate --verbose
 ```
 

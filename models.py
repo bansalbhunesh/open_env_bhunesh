@@ -138,6 +138,9 @@ class BaselineResponse(BaseModel):
 
 class TaskCatalogResponse(BaseModel):
     tasks: List[TaskDescriptor]
+    action_schema: Dict[str, Any] = Field(default_factory=dict)
+    action_required_fields: List[str] = Field(default_factory=list)
+    action_fields: Dict[str, Dict[str, Any]] = Field(default_factory=dict)
 
 
 class SupportOpsAction(Action):
