@@ -8,7 +8,9 @@
 
 from __future__ import annotations
 
+import os
 import random
+import time
 from uuid import uuid4
 
 from openenv.core.env_server.interfaces import Environment
@@ -54,6 +56,10 @@ class SupportOpsEnvironment(Environment):
         self._task_id = ORDERED_TASK_IDS[0]
         self._required_customer_fields: dict[str, str] = {}
         self._resolved = False
+        self._fault_mode = os.getenv("DEBUG_FAULT_INJECTION", "").strip().lower()
+        self._fault_trigger_step = int(os.getenv("DEBUG_FAULT_STEP", "2"))
+        self._fault_latency_ms = int(os.getenv("DEBUG_FAULT_LATENCY_MS", "750"))
+        self._fault_triggered = False
 
     def reset(
         self,
@@ -81,6 +87,7 @@ class SupportOpsEnvironment(Environment):
         episode_identifier = episode_id or str(uuid4())
         self._required_customer_fields = dict(scenario.required_customer_fields)
         self._resolved = False
+        self._fault_triggered = False
 
         self._state = SupportOpsState(
             episode_id=episode_identifier,
@@ -108,6 +115,8 @@ class SupportOpsEnvironment(Environment):
         **_: object,
     ) -> SupportOpsObservation:
         del timeout_s
+
+        self._apply_fault_injection_pre_step()
 
         if self._resolved:
             return self._build_observation(
@@ -274,6 +283,10 @@ class SupportOpsEnvironment(Environment):
             "A real-world support operations benchmark with ticket triage, "
             "customer follow-up, and deterministic graders."
         )
+        if self._fault_mode:
+            metadata.description += (
+                f" Fault injection is enabled in `{self._fault_mode}` mode for resilience testing."
+            )
         return metadata
 
     def _build_observation(
@@ -307,6 +320,7 @@ class SupportOpsEnvironment(Environment):
                 "grader_breakdown": [item.model_dump() for item in grade.breakdown],
                 "episode_export": episode.model_dump(mode="json"),
                 "available_operations": [operation.value for operation in ActionOperation],
+                "fault_injection_mode": self._fault_mode or "off",
             },
         )
 
@@ -324,6 +338,27 @@ class SupportOpsEnvironment(Environment):
             history=list(self._state.history),
             progress_score=self._state.progress_score,
         )
+
+    def _apply_fault_injection_pre_step(self) -> None:
+        """Inject optional, clearly labeled debug faults for resilience testing."""
+        if not self._fault_mode:
+            return
+
+        if self._fault_mode == "latency":
+            time.sleep(max(self._fault_latency_ms, 0) / 1000.0)
+            return
+
+        if self._fault_mode == "transient_error":
+            should_trigger = (
+                not self._fault_triggered
+                and self._state.step_count + 1 >= max(self._fault_trigger_step, 1)
+            )
+            if should_trigger:
+                self._fault_triggered = True
+                raise RuntimeError(
+                    "DEBUG_FAULT_INJECTION transient_error triggered. "
+                    "Disable DEBUG_FAULT_INJECTION to restore normal behavior."
+                )
 
 
 def _normalize_tag(tag: str) -> str:

@@ -246,6 +246,34 @@ python -m support_ops_env.baseline_inference --base-url http://localhost:8000
 openenv validate --verbose
 ```
 
+## Fault Injection
+
+For safe resilience testing, the environment includes an opt-in debug fault mode that is off by default.
+
+Supported environment variables:
+
+- `DEBUG_FAULT_INJECTION=latency`
+- `DEBUG_FAULT_INJECTION=transient_error`
+- `DEBUG_FAULT_LATENCY_MS=750`
+- `DEBUG_FAULT_STEP=2`
+
+Examples:
+
+```bash
+DEBUG_FAULT_INJECTION=latency DEBUG_FAULT_LATENCY_MS=1200 uvicorn server.app:app --host 0.0.0.0 --port 8000
+```
+
+```bash
+DEBUG_FAULT_INJECTION=transient_error DEBUG_FAULT_STEP=3 uvicorn server.app:app --host 0.0.0.0 --port 8000
+```
+
+Behavior:
+
+- `latency` adds an artificial delay before every `step()`
+- `transient_error` raises a single clearly labeled runtime error on the configured step, then resumes normal behavior after reset
+
+This mode is intended for local debugging and client retry testing. Leave it unset for normal training, validation, and deployment.
+
 ## Project Layout
 
 ```text
