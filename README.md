@@ -142,29 +142,35 @@ uvicorn server.app:app --host 0.0.0.0 --port 8000
 curl http://localhost:8000/tasks
 ```
 
-### 4. Run the baseline script (OpenAI mode)
+### 4. Run inference (LLM-driven agent)
+
+The submission requires three environment variables:
+
+| Variable | Description |
+|---|---|
+| `API_BASE_URL` | API endpoint for the LLM (e.g. `https://api.openai.com/v1`) |
+| `MODEL_NAME` | Model identifier (e.g. `gpt-4o-mini`) |
+| `HF_TOKEN` | Hugging Face / API key |
 
 ```bash
-set OPENAI_API_KEY=your_key_here
-python -m support_ops_env.baseline_inference --base-url http://localhost:8000 --mode openai --model gpt-4o-mini
+set API_BASE_URL=https://api.openai.com/v1
+set MODEL_NAME=gpt-4o-mini
+set HF_TOKEN=your_key_here
+python inference.py
 ```
 
-Deterministic fallback mode (no model API calls):
+The script runs all three tasks, uses the OpenAI client for action selection, and emits structured `[START]`, `[STEP]`, `[END]` logs to stdout.
+
+### 5. Run the deterministic baseline (no LLM)
 
 ```bash
 python -m support_ops_env.baseline_inference --base-url http://localhost:8000 --mode deterministic
 ```
 
-### 5. Run the built-in baseline endpoint
+### 6. Run the built-in baseline endpoint
 
 ```bash
 curl http://localhost:8000/baseline
-```
-
-You can also request OpenAI baseline mode through the endpoint:
-
-```bash
-curl "http://localhost:8000/baseline?mode=openai"
 ```
 
 ## Example Client Usage
@@ -297,6 +303,7 @@ support_ops_env/
   baseline_inference.py
   client.py
   evaluation.py
+  inference.py              ← submission entry point (uses OpenAI client)
   models.py
   openenv.yaml
   pyproject.toml
