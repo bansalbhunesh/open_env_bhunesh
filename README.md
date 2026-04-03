@@ -227,7 +227,7 @@ with client:
 Build locally:
 
 ```bash
-docker build -t support_ops_env-env:latest -f server/Dockerfile .
+docker build -t support_ops_env-env:latest .
 ```
 
 Run locally:
@@ -302,6 +302,7 @@ support_ops_env/
   __init__.py
   baseline_inference.py
   client.py
+  Dockerfile                ← root Dockerfile for HF Spaces
   evaluation.py
   inference.py              ← submission entry point (uses OpenAI client)
   models.py
