@@ -53,17 +53,8 @@ MAX_STEPS_PER_TASK = 8
 # ── helpers ────────────────────────────────────────────────────────────────
 
 def _post(endpoint: str, payload: dict | None = None) -> dict:
-    """POST to the environment server."""
     url = f"{ENV_SERVER_URL}{endpoint}"
     resp = requests.post(url, json=payload or {}, timeout=60)
-    resp.raise_for_status()
-    return resp.json()
-
-
-def _get(endpoint: str) -> dict:
-    """GET from the environment server."""
-    url = f"{ENV_SERVER_URL}{endpoint}"
-    resp = requests.get(url, timeout=60)
     resp.raise_for_status()
     return resp.json()
 
@@ -140,16 +131,7 @@ def run_task(task_id: str) -> Dict[str, Any]:
     observation = reset_resp.get("observation", reset_resp)
 
     # ── [START] ──
-    print(
-        json.dumps(
-            {
-                "event": "[START]",
-                "task_id": task_id,
-                "timestamp": time.time(),
-            }
-        ),
-        flush=True,
-    )
+    print(f"[START] task={task_id}", flush=True)
 
     done = False
     step_count = 0
@@ -159,26 +141,15 @@ def run_task(task_id: str) -> Dict[str, Any]:
         # Ask the LLM for the next action
         action = _call_llm(observation)
 
-        # ── [STEP] ──
-        print(
-            json.dumps(
-                {
-                    "event": "[STEP]",
-                    "task_id": task_id,
-                    "step": step_count,
-                    "action": action,
-                    "timestamp": time.time(),
-                }
-            ),
-            flush=True,
-        )
-
         # Execute the action
         step_resp = _post("/step", action)
         observation = step_resp.get("observation", step_resp)
         reward = step_resp.get("reward", observation.get("reward", 0.0))
         done = step_resp.get("done", observation.get("done", False))
         step_count += 1
+
+        # ── [STEP] ──
+        print(f"[STEP] step={step_count} reward={reward}", flush=True)
 
     # Grade the episode
     episode_export = observation.get("metadata", {}).get("episode_export", {})
@@ -191,20 +162,7 @@ def run_task(task_id: str) -> Dict[str, Any]:
     passed = grader_resp.get("passed", False)
 
     # ── [END] ──
-    print(
-        json.dumps(
-            {
-                "event": "[END]",
-                "task_id": task_id,
-                "score": score,
-                "passed": passed,
-                "steps_taken": step_count,
-                "reward": reward,
-                "timestamp": time.time(),
-            }
-        ),
-        flush=True,
-    )
+    print(f"[END] task={task_id} score={score} steps={step_count}", flush=True)
 
     return {
         "task_id": task_id,
@@ -215,14 +173,6 @@ def run_task(task_id: str) -> Dict[str, Any]:
 
 
 def main() -> None:
-    print("=" * 60, flush=True)
-    print("Support Ops Environment — Inference Script", flush=True)
-    print("=" * 60, flush=True)
-    print(f"API_BASE_URL : {API_BASE_URL}", flush=True)
-    print(f"MODEL_NAME   : {MODEL_NAME}", flush=True)
-    print(f"ENV_SERVER   : {ENV_SERVER_URL}", flush=True)
-    print("=" * 60, flush=True)
-
     results: List[Dict[str, Any]] = []
 
     for task_id in TASK_IDS:
@@ -230,20 +180,9 @@ def main() -> None:
             result = run_task(task_id)
             results.append(result)
         except Exception as exc:
-            print(
-                json.dumps(
-                    {
-                        "event": "[END]",
-                        "task_id": task_id,
-                        "error": str(exc),
-                        "score": 0.0,
-                        "passed": False,
-                        "steps_taken": 0,
-                        "timestamp": time.time(),
-                    }
-                ),
-                flush=True,
-            )
+            # Silence internal generic errors that would corrupt stdout parsing
+            # Just print the cleanly expected [END]
+            print(f"[END] task={task_id} score=0.0 steps=0", flush=True)
             results.append(
                 {
                     "task_id": task_id,
@@ -253,20 +192,6 @@ def main() -> None:
                     "error": str(exc),
                 }
             )
-
-    # Final summary
-    avg_score = (
-        sum(r["score"] for r in results) / len(results) if results else 0.0
-    )
-    summary = {
-        "average_score": round(avg_score, 4),
-        "tasks": results,
-    }
-    print("\n" + "=" * 60, flush=True)
-    print("FINAL RESULTS", flush=True)
-    print("=" * 60, flush=True)
-    print(json.dumps(summary, indent=2), flush=True)
-
 
 if __name__ == "__main__":
     main()
