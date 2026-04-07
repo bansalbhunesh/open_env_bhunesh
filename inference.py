@@ -1,37 +1,35 @@
+#!/usr/bin/env python3
 """
 Inference script for the Support Ops OpenEnv environment.
-===================================
-MANDATORY
-- Environment variables:
-    API_BASE_URL   The API endpoint for the LLM.
-    MODEL_NAME     The model identifier to use for inference.
-    HF_TOKEN       Your Hugging Face / API key.
 
-STDOUT FORMAT
+STDOUT FORMAT (mandatory):
     [START] task=<task_name> env=<benchmark> model=<model_name>
     [STEP]  step=<n> action=<action_str> reward=<0.00> done=<true|false> error=<msg|null>
     [END]   success=<true|false> steps=<n> score=<score> rewards=<r1,r2,...,rn>
 """
 
-import asyncio
 import json
 import os
-from typing import List, Optional
+import sys
+import time
 
+# Force unbuffered stdout so the validator captures every line immediately
+sys.stdout.reconfigure(line_buffering=True)
+os.environ["PYTHONUNBUFFERED"] = "1"
+
+import requests
 from openai import OpenAI
-
-from support_ops_env import SupportOpsAction, SupportOpsEnv
 
 # ---------------------------------------------------------------------------
 # Environment variables (mandatory per hackathon rules)
 # ---------------------------------------------------------------------------
-API_KEY = os.getenv("HF_TOKEN") or os.getenv("API_KEY")
 API_BASE_URL = os.getenv("API_BASE_URL", "https://api.openai.com/v1")
 MODEL_NAME = os.getenv("MODEL_NAME", "gpt-4o-mini")
+HF_TOKEN = os.getenv("HF_TOKEN", "")
 ENV_SERVER_URL = os.getenv("ENV_SERVER_URL", "http://localhost:8000")
 
 BENCHMARK = "support_ops_env"
-TASK_IDS: List[str] = [
+TASK_IDS = [
     "password_reset_lockout",
     "duplicate_invoice_refund",
     "gdpr_export_incident",
@@ -57,56 +55,58 @@ SYSTEM_PROMPT = (
     "Return valid JSON only, no markdown, no explanation."
 )
 
+# ---------------------------------------------------------------------------
+# OpenAI client
+# ---------------------------------------------------------------------------
+llm_client = OpenAI(api_key=HF_TOKEN, base_url=API_BASE_URL)
 
-# ── structured logging helpers (matches official format exactly) ───────────
 
-def log_start(task: str, env: str, model: str) -> None:
+# ── structured logging (matches official format exactly) ───────────────────
+
+def log_start(task, env, model):
     print(f"[START] task={task} env={env} model={model}", flush=True)
 
+def log_step(step, action, reward, done, error):
+    e = error if error else "null"
+    d = str(done).lower()
+    print(f"[STEP] step={step} action={action} reward={reward:.2f} done={d} error={e}", flush=True)
 
-def log_step(step: int, action: str, reward: float, done: bool, error: Optional[str]) -> None:
-    error_val = error if error else "null"
-    done_val = str(done).lower()
-    print(
-        f"[STEP] step={step} action={action} reward={reward:.2f} done={done_val} error={error_val}",
-        flush=True,
-    )
-
-
-def log_end(success: bool, steps: int, score: float, rewards: List[float]) -> None:
-    rewards_str = ",".join(f"{r:.2f}" for r in rewards)
-    print(
-        f"[END] success={str(success).lower()} steps={steps} score={score:.2f} rewards={rewards_str}",
-        flush=True,
-    )
+def log_end(success, steps, score, rewards):
+    r = ",".join(f"{x:.2f}" for x in rewards)
+    print(f"[END] success={str(success).lower()} steps={steps} score={score:.2f} rewards={r}", flush=True)
 
 
-# ── LLM helper ────────────────────────────────────────────────────────────
+# ── HTTP helpers (synchronous, minimal, no WebSocket) ──────────────────────
 
-def get_action(llm_client: OpenAI, observation) -> dict:
-    """Ask the LLM for the next action given the current observation."""
-    obs_dict = observation.model_dump(mode="json") if hasattr(observation, "model_dump") else {}
+def env_post(endpoint, payload=None):
+    url = f"{ENV_SERVER_URL}{endpoint}"
+    resp = requests.post(url, json=payload or {}, timeout=120)
+    resp.raise_for_status()
+    return resp.json()
+
+
+# ── LLM call ──────────────────────────────────────────────────────────────
+
+def call_llm(observation):
     context = {
-        "task_id": obs_dict.get("task_id", ""),
-        "task_title": obs_dict.get("task_title", ""),
-        "difficulty": obs_dict.get("difficulty", ""),
-        "goal": obs_dict.get("goal", ""),
-        "customer_message": obs_dict.get("customer_message", ""),
-        "customer_profile": obs_dict.get("customer_profile", {}),
-        "knowledge_base": obs_dict.get("knowledge_base", []),
-        "ticket_snapshot": obs_dict.get("ticket_snapshot", {}),
-        "revealed_customer_facts": obs_dict.get("revealed_customer_facts", {}),
-        "outstanding_requirements": obs_dict.get("outstanding_requirements", []),
-        "action_history": obs_dict.get("action_history", []),
-        "last_feedback": obs_dict.get("last_feedback", ""),
-        "available_operations": obs_dict.get("metadata", {}).get("available_operations", []),
+        "task_id": observation.get("task_id", ""),
+        "task_title": observation.get("task_title", ""),
+        "difficulty": observation.get("difficulty", ""),
+        "goal": observation.get("goal", ""),
+        "customer_message": observation.get("customer_message", ""),
+        "customer_profile": observation.get("customer_profile", {}),
+        "knowledge_base": observation.get("knowledge_base", []),
+        "ticket_snapshot": observation.get("ticket_snapshot", {}),
+        "revealed_customer_facts": observation.get("revealed_customer_facts", {}),
+        "outstanding_requirements": observation.get("outstanding_requirements", []),
+        "action_history": observation.get("action_history", []),
+        "last_feedback": observation.get("last_feedback", ""),
+        "available_operations": observation.get("metadata", {}).get("available_operations", []),
     }
     user_prompt = (
         "Based on the current ticket state below, choose the single best next "
-        "action and return JSON only.\n\n"
-        + json.dumps(context, indent=2)
+        "action and return JSON only.\n\n" + json.dumps(context, indent=2)
     )
-
     try:
         completion = llm_client.chat.completions.create(
             model=MODEL_NAME,
@@ -127,63 +127,52 @@ def get_action(llm_client: OpenAI, observation) -> dict:
 
 # ── main loop ──────────────────────────────────────────────────────────────
 
-async def run_task(llm_client: OpenAI, env, task_id: str) -> dict:
-    """Run a single task episode."""
-
-    rewards: List[float] = []
+def run_task(task_id):
+    rewards = []
     steps_taken = 0
     score = 0.0
     success = False
 
+    # [START] is printed FIRST, before any network I/O
     log_start(task=task_id, env=BENCHMARK, model=MODEL_NAME)
 
     try:
-        result = await env.reset(task_id=task_id, seed=7)
-        observation = result.observation
+        reset_resp = env_post("/reset", {"task_id": task_id, "seed": 7})
+        observation = reset_resp.get("observation", reset_resp)
 
-        for step in range(1, MAX_STEPS + 1):
-            if result.done:
-                break
+        done = False
+        while not done and steps_taken < MAX_STEPS:
+            action = call_llm(observation)
+            action_str = action.get("operation", "unknown")
 
-            action_dict = get_action(llm_client, observation)
-            action_str = action_dict.get("operation", "unknown")
-            action = SupportOpsAction.model_validate(action_dict)
-
-            result = await env.step(action)
-            observation = result.observation
-
-            reward = result.reward or 0.0
-            done = result.done
-            error = None
+            step_resp = env_post("/step", action)
+            observation = step_resp.get("observation", step_resp)
+            reward = step_resp.get("reward", observation.get("reward", 0.0))
+            done = step_resp.get("done", observation.get("done", False))
+            error = step_resp.get("last_action_error", None)
+            steps_taken += 1
 
             rewards.append(reward)
-            steps_taken = step
+            log_step(step=steps_taken, action=action_str, reward=reward, done=done, error=error)
 
-            log_step(step=step, action=action_str, reward=reward, done=done, error=error)
-
-            if done:
-                break
-
-        # Compute score from grader
-        score = observation.model_dump(mode="json").get("metadata", {}).get(
-            "episode_export", {}
-        ).get("progress_score", sum(rewards) / max(len(rewards), 1))
+        # Grade the episode
+        episode_export = observation.get("metadata", {}).get("episode_export", {})
+        grader_resp = env_post("/grader", {"task_id": task_id, "episode": episode_export})
+        score = grader_resp.get("score", 0.0)
         score = min(max(score, 0.0), 1.0)
-        success = score >= 0.75
+        success = grader_resp.get("passed", False)
+
+    except Exception:
+        pass  # [END] is always emitted in finally
 
     finally:
         log_end(success=success, steps=steps_taken, score=score, rewards=rewards)
 
-    return {"task_id": task_id, "score": score, "passed": success, "steps": steps_taken}
 
-
-async def main() -> None:
-    llm_client = OpenAI(base_url=API_BASE_URL, api_key=API_KEY)
-
-    async with SupportOpsEnv(base_url=ENV_SERVER_URL) as env:
-        for task_id in TASK_IDS:
-            await run_task(llm_client, env, task_id)
+def main():
+    for task_id in TASK_IDS:
+        run_task(task_id)
 
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    main()
