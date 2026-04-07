@@ -13,7 +13,6 @@ import os
 import sys
 
 import requests
-from openai import OpenAI
 
 # ---------------------------------------------------------------------------
 # Environment variables (mandatory per hackathon rules)
@@ -50,7 +49,24 @@ SYSTEM_PROMPT = (
     "Return valid JSON only, no markdown, no explanation."
 )
 
-llm_client = OpenAI(api_key=HF_TOKEN, base_url=API_BASE_URL)
+# ---------------------------------------------------------------------------
+# NOTE: llm_client is intentionally NOT initialized at module level.
+# Initializing OpenAI(...) at import time with an empty/missing API key causes
+# newer versions of the openai library to raise AuthenticationError before
+# main() is ever called — meaning no [START]/[END] blocks are printed at all.
+# We create the client lazily inside call_llm() instead.
+# ---------------------------------------------------------------------------
+_llm_client = None
+
+
+def _get_llm_client():
+    """Lazily initialize the OpenAI client so module import never crashes."""
+    global _llm_client
+    if _llm_client is None:
+        from openai import OpenAI  # local import to avoid top-level crash
+        # Use a placeholder if token is empty to satisfy constructor validation
+        _llm_client = OpenAI(api_key=HF_TOKEN or "placeholder", base_url=API_BASE_URL)
+    return _llm_client
 
 
 # ── structured logging (matches official format exactly) ───────────────────
@@ -102,7 +118,8 @@ def call_llm(observation):
         "action and return JSON only.\n\n" + json.dumps(context, indent=2)
     )
     try:
-        completion = llm_client.chat.completions.create(
+        client = _get_llm_client()
+        completion = client.chat.completions.create(
             model=MODEL_NAME,
             temperature=0,
             seed=42,
@@ -130,7 +147,9 @@ def run_task(task_id):
     score = 0.0
     success = False
 
-    # [START] is always the first thing printed, before any network call
+    # [START] is always the VERY FIRST thing printed — before any network call.
+    # This guarantees the validator sees structured output even if everything
+    # downstream fails.
     log_start(task=task_id, env=BENCHMARK, model=MODEL_NAME)
 
     try:
