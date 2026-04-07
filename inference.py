@@ -11,11 +11,6 @@ STDOUT FORMAT (mandatory):
 import json
 import os
 import sys
-import time
-
-# Force unbuffered stdout so the validator captures every line immediately
-sys.stdout.reconfigure(line_buffering=True)
-os.environ["PYTHONUNBUFFERED"] = "1"
 
 import requests
 from openai import OpenAI
@@ -55,9 +50,6 @@ SYSTEM_PROMPT = (
     "Return valid JSON only, no markdown, no explanation."
 )
 
-# ---------------------------------------------------------------------------
-# OpenAI client
-# ---------------------------------------------------------------------------
 llm_client = OpenAI(api_key=HF_TOKEN, base_url=API_BASE_URL)
 
 
@@ -66,17 +58,19 @@ llm_client = OpenAI(api_key=HF_TOKEN, base_url=API_BASE_URL)
 def log_start(task, env, model):
     print(f"[START] task={task} env={env} model={model}", flush=True)
 
+
 def log_step(step, action, reward, done, error):
     e = error if error else "null"
     d = str(done).lower()
     print(f"[STEP] step={step} action={action} reward={reward:.2f} done={d} error={e}", flush=True)
+
 
 def log_end(success, steps, score, rewards):
     r = ",".join(f"{x:.2f}" for x in rewards)
     print(f"[END] success={str(success).lower()} steps={steps} score={score:.2f} rewards={r}", flush=True)
 
 
-# ── HTTP helpers (synchronous, minimal, no WebSocket) ──────────────────────
+# ── HTTP helpers ───────────────────────────────────────────────────────────
 
 def env_post(endpoint, payload=None):
     url = f"{ENV_SERVER_URL}{endpoint}"
@@ -104,7 +98,7 @@ def call_llm(observation):
         "available_operations": observation.get("metadata", {}).get("available_operations", []),
     }
     user_prompt = (
-        "Based on the current ticket state below, choose the single best next "
+        "Based on the current ticket state, choose the single best next "
         "action and return JSON only.\n\n" + json.dumps(context, indent=2)
     )
     try:
@@ -121,11 +115,14 @@ def call_llm(observation):
         raw = completion.choices[0].message.content or "{}"
         return json.loads(raw)
     except Exception:
-        return {"operation": "resolve", "resolution_code": "guidance_provided",
-                "resolution_summary": "Resolved with guidance."}
+        return {
+            "operation": "resolve",
+            "resolution_code": "guidance_provided",
+            "resolution_summary": "Resolved with guidance.",
+        }
 
 
-# ── main loop ──────────────────────────────────────────────────────────────
+# ── task runner ────────────────────────────────────────────────────────────
 
 def run_task(task_id):
     rewards = []
@@ -133,7 +130,7 @@ def run_task(task_id):
     score = 0.0
     success = False
 
-    # [START] is printed FIRST, before any network I/O
+    # [START] is always the first thing printed, before any network call
     log_start(task=task_id, env=BENCHMARK, model=MODEL_NAME)
 
     try:
@@ -147,8 +144,8 @@ def run_task(task_id):
 
             step_resp = env_post("/step", action)
             observation = step_resp.get("observation", step_resp)
-            reward = step_resp.get("reward", observation.get("reward", 0.0))
-            done = step_resp.get("done", observation.get("done", False))
+            reward = float(step_resp.get("reward", observation.get("reward", 0.0)) or 0.0)
+            done = bool(step_resp.get("done", observation.get("done", False)))
             error = step_resp.get("last_action_error", None)
             steps_taken += 1
 
@@ -158,12 +155,13 @@ def run_task(task_id):
         # Grade the episode
         episode_export = observation.get("metadata", {}).get("episode_export", {})
         grader_resp = env_post("/grader", {"task_id": task_id, "episode": episode_export})
-        score = grader_resp.get("score", 0.0)
+        score = float(grader_resp.get("score", 0.0))
         score = min(max(score, 0.0), 1.0)
-        success = grader_resp.get("passed", False)
+        success = bool(grader_resp.get("passed", False))
 
     except Exception:
-        pass  # [END] is always emitted in finally
+        # Swallow all errors — [END] is always emitted in finally
+        pass
 
     finally:
         log_end(success=success, steps=steps_taken, score=score, rewards=rewards)
