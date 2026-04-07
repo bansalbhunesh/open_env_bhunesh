@@ -2,11 +2,14 @@
 Inference script for the Support Ops OpenEnv environment.
 
 Uses the OpenAI Client with environment variables:
-    API_BASE_URL  – LLM API endpoint
-    MODEL_NAME    – model identifier
-    HF_TOKEN      – Hugging Face / API key
+    API_BASE_URL  - LLM API endpoint
+    MODEL_NAME    - model identifier
+    HF_TOKEN      - Hugging Face / API key
 
-Emits structured stdout logs in [START], [STEP], [END] format.
+STDOUT FORMAT (mandatory):
+    [START] task=<task_name> env=<benchmark> model=<model_name>
+    [STEP]  step=<n> action=<action_str> reward=<0.00> done=<true|false> error=<msg|null>
+    [END]   success=<true|false> steps=<n> score=<score> rewards=<r1,r2,...,rn>
 """
 
 from __future__ import annotations
@@ -15,7 +18,7 @@ import json
 import os
 import sys
 import time
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
 import requests
 from openai import OpenAI
@@ -29,6 +32,8 @@ HF_TOKEN: str = os.environ.get("HF_TOKEN", "")
 
 # The environment server URL (local or HF Space)
 ENV_SERVER_URL: str = os.environ.get("ENV_SERVER_URL", "http://localhost:8000")
+
+BENCHMARK: str = "support_ops_env"
 
 # ---------------------------------------------------------------------------
 # OpenAI client (all LLM calls go through this)
@@ -48,6 +53,29 @@ TASK_IDS: List[str] = [
 ]
 
 MAX_STEPS_PER_TASK = 8
+
+
+# ── structured logging helpers ─────────────────────────────────────────────
+
+def log_start(task: str, env: str, model: str) -> None:
+    print(f"[START] task={task} env={env} model={model}", flush=True)
+
+
+def log_step(step: int, action: str, reward: float, done: bool, error: Optional[str]) -> None:
+    error_val = error if error else "null"
+    done_val = str(done).lower()
+    print(
+        f"[STEP] step={step} action={action} reward={reward:.2f} done={done_val} error={error_val}",
+        flush=True,
+    )
+
+
+def log_end(success: bool, steps: int, score: float, rewards: List[float]) -> None:
+    rewards_str = ",".join(f"{r:.2f}" for r in rewards)
+    print(
+        f"[END] success={str(success).lower()} steps={steps} score={score:.2f} rewards={rewards_str}",
+        flush=True,
+    )
 
 
 # ── helpers ────────────────────────────────────────────────────────────────
@@ -126,72 +154,72 @@ def _call_llm(observation: dict) -> dict:
 def run_task(task_id: str) -> Dict[str, Any]:
     """Run a single task and return the grader result."""
 
-    # Reset the environment
-    reset_resp = _post("/reset", {"task_id": task_id, "seed": 7})
-    observation = reset_resp.get("observation", reset_resp)
-
-    # ── [START] ──
-    print(f"[START] task={task_id}", flush=True)
-
-    done = False
+    rewards: List[float] = []
     step_count = 0
-    reward = 0.0
+    score = 0.0
+    success = False
 
-    while not done and step_count < MAX_STEPS_PER_TASK:
-        # Ask the LLM for the next action
-        action = _call_llm(observation)
+    log_start(task=task_id, env=BENCHMARK, model=MODEL_NAME)
 
-        # Execute the action
-        step_resp = _post("/step", action)
-        observation = step_resp.get("observation", step_resp)
-        reward = step_resp.get("reward", observation.get("reward", 0.0))
-        done = step_resp.get("done", observation.get("done", False))
-        step_count += 1
+    try:
+        # Reset the environment
+        reset_resp = _post("/reset", {"task_id": task_id, "seed": 7})
+        observation = reset_resp.get("observation", reset_resp)
 
-        # ── [STEP] ──
-        print(f"[STEP] step={step_count} reward={reward}", flush=True)
+        done = False
 
-    # Grade the episode
-    episode_export = observation.get("metadata", {}).get("episode_export", {})
-    grader_resp = _post(
-        "/grader",
-        {"task_id": task_id, "episode": episode_export},
-    )
+        while not done and step_count < MAX_STEPS_PER_TASK:
+            # Ask the LLM for the next action
+            action = _call_llm(observation)
+            action_str = action.get("operation", "unknown")
 
-    score = grader_resp.get("score", 0.0)
-    passed = grader_resp.get("passed", False)
+            # Execute the action
+            step_resp = _post("/step", action)
+            observation = step_resp.get("observation", step_resp)
+            reward = step_resp.get("reward", observation.get("reward", 0.0))
+            done = step_resp.get("done", observation.get("done", False))
+            error = step_resp.get("last_action_error", None)
+            step_count += 1
 
-    # ── [END] ──
-    print(f"[END] task={task_id} score={score} steps={step_count}", flush=True)
+            rewards.append(reward)
+
+            log_step(
+                step=step_count,
+                action=action_str,
+                reward=reward,
+                done=done,
+                error=error,
+            )
+
+        # Grade the episode
+        episode_export = observation.get("metadata", {}).get("episode_export", {})
+        grader_resp = _post(
+            "/grader",
+            {"task_id": task_id, "episode": episode_export},
+        )
+
+        score = grader_resp.get("score", 0.0)
+        passed = grader_resp.get("passed", False)
+        success = passed
+
+    except Exception:
+        pass  # [END] is always emitted in the finally block
+
+    finally:
+        log_end(success=success, steps=step_count, score=score, rewards=rewards)
 
     return {
         "task_id": task_id,
         "score": score,
-        "passed": passed,
+        "passed": success,
         "steps_taken": step_count,
     }
 
 
 def main() -> None:
-    results: List[Dict[str, Any]] = []
-
     for task_id in TASK_IDS:
-        try:
-            result = run_task(task_id)
-            results.append(result)
-        except Exception as exc:
-            # Silence internal generic errors that would corrupt stdout parsing
-            # Just print the cleanly expected [END]
-            print(f"[END] task={task_id} score=0.0 steps=0", flush=True)
-            results.append(
-                {
-                    "task_id": task_id,
-                    "score": 0.0,
-                    "passed": False,
-                    "steps_taken": 0,
-                    "error": str(exc),
-                }
-            )
+        run_task(task_id)
+
 
 if __name__ == "__main__":
     main()
